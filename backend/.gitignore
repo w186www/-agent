@@ -1,0 +1,8 @@
+# 敏感配置与本地文件不入版本库
+.env
+.env.production
+!.env.example
+
+.venv/
+logs/
+__pycache__/

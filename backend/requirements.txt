@@ -1,0 +1,43 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+passlib[bcrypt]==1.7.4
+# passlib 1.7.4 与 bcrypt>=4.3 不兼容（缺少 __about__ 且 72 字节密码改为抛异常），固定 4.0.1
+bcrypt==4.0.1
+sqlalchemy>=2.0
+pymysql>=1.1
+# MySQL 8 默认 caching_sha2_password 认证需要
+cryptography>=42.0
+alembic>=1.13
+python-dotenv>=1.0
+pydantic-settings>=2.0
+PyJWT>=2.8
+python-multipart==0.0.9
+minio>=7.2
+qdrant-client>=1.9
+
+# AI 三层（模型层 / 提示词层 / 记忆层）
+# 固定 0.3.x：保留 langchain.memory（ConversationBufferWindowMemory）经典 API
+langchain==0.3.*
+langchain-openai==0.3.*
+dashscope>=1.20
+
+# Tavily 联网搜索（招投标 Agent 工具 search_tender）
+tavily-python==0.5.*
+
+# 招投标文档下载与解析（download_tender / parse_tender）
+beautifulsoup4==4.12.*
+lxml==5.*
+pymupdf==1.24.*
+python-docx==1.1.*
+
+# 扫描版 PDF OCR 兜底（kb_ingest 提取文本，火山引擎 OCRNormal）
+volcengine>=1.0.0
+pillow>=10.0.0
+
+# LangGraph 状态机（招投标 Agent 图，替换 AgentExecutor，为 HITL 中断做准备）
+# 注：langgraph-checkpoint 由 langgraph 自动安装（0.2.* 依赖 checkpoint>=2.0.10，PyPI 无 0.2.x）
+langgraph==0.2.*
+
+# 测试依赖
+pytest>=8.0
+httpx>=0.27
