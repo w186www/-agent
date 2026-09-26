@@ -41,10 +41,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS：开发环境允许前端跨域请求（生产环境应限制具体域名）
+# CORS：仅允许白名单来源携带凭证跨域（allow_credentials=True 时不能配合 "*" 使用），
+# 来源由 CORS_ORIGINS 环境变量配置，默认放行本地 Vite 开发服务器
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

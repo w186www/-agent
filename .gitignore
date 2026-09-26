@@ -1,3 +1,18 @@
-# 调试脚本
-backend/_dbg_*.py
-frontend/_reg.py
+# 调试/临时脚本
+_dbg_*.py
+_repro_*.py
+tmp_*.py
+_timing.py
+_test_*.py
+
+# 运行时数据（上传文件、招标文件下载等，由应用启动时自动创建）
+backend/data/
+
+# 依赖与构建产物
+node_modules/
+dist/
+.venv/
+__pycache__/
+.pytest_cache/
+logs/
+.pw-browsers/

@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # 基础
     app_env: str = "dev"             # 运行环境
-    app_name: str = "用户管理服务"    # 服务名称
+    app_name: str = "等保测评全流程助手"    # 服务名称
     app_version: str = "0.1.0"       # 服务版本
 
     # 敏感配置：必填，由环境文件提供，代码不设默认值
@@ -101,6 +101,9 @@ class Settings(BaseSettings):
     # 测评核查（技术线：清单生成 / VLM 分析 / 比对置信度）
     confidence_threshold: float = 0.80        # 自动通过置信度阈值：>= 阈值 status=3 自动通过，< 阈值 status=4 待人工复核
     assessment_max_checklist: int = 50        # 单次生成最大控制点数（generate_checklist 截断上限）
+
+    # CORS 允许来源（逗号分隔，CORS_ORIGINS 环境变量覆盖；生产必须配置为前端实际域名）
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     model_config = SettingsConfigDict(env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
