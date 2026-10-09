@@ -277,15 +277,21 @@ _SELF_CHECK_SYSTEM = """你是「废标自检专员」。对生成的投标文�
   "summary": "共检查N项，通过X项，警告Y项，危险Z项"
 }"""
 
-_BIDDING_REVIEW_SYSTEM = """你是「投标文件审核专员」。对用户上传的投标文件逐项审核，输出结构化 JSON（只输出 JSON）。
+_BIDDING_REVIEW_SYSTEM = """你是「投标文件审核专员」。对用户上传的投标文件做**语义层面**审核，输出结构化 JSON（只输出 JSON）。
 
-审核维度：
-1. 废标项检查：有招标文件解析结果（tender_info）时，逐条对照废标项与资格要求交叉比对；
-   无 tender_info 时，做常见废标项通用检查（投标保证金、签字盖章、资格证明、关键内容完整等）；
-2. 格式检查：签章、份数、装订、密封、报价格式等；
-3. 错别字检查：扫描错别字与用词不当，给出所在位置（如"第3页第2段"）。
+投标文件全文已按【第 N 页】分页标记，页码标记是可信的页码来源，请据此定位每条结论的原文页码。
 
-状态语义：danger=废标风险（资格不满足/关键内容缺失）、warning=瑕疵可澄清补正、pass=完全满足。
+审核维度（只做需要读懂语义的判断）：
+1. 废标项检查：有招标文件解析结果（tender_info）时，逐条对照废标项与资格要求，判断投标内容是否**实质偏离**或缺失；
+   无 tender_info 时，做常见废标项通用判断（投标保证金、签字盖章、资格证明、关键技术方案完整等）；
+2. 评分点响应：判断技术/商务方案是否实质满足招标文件评分点要求，指出未响应或响应不足之处；
+3. 措辞风险：识别可能构成不利承诺、前后矛盾或表述不当的措辞；
+4. 错别字检查：扫描明显错别字与用词不当；若能用页码标记定位则填 page，否则填 null。
+
+状态语义：danger=废标风险（资格不满足/关键内容缺失或实质偏离）、warning=瑕疵可澄清补正、pass=完全满足。
+
+【审核范围】以下确定性检查由后端规则负责，**不要重复输出**：页数、空白页、占位符残留、
+材料清单是否齐全、页码连续性。你只做需要理解语义的判断：废标项实质偏离、方案是否满足评分点、措辞风险等。
 
 输出 JSON 结构：
 {
@@ -293,17 +299,20 @@ _BIDDING_REVIEW_SYSTEM = """你是「投标文件审核专员」。对用户上�
   "items": [
     {
       "item": "检查项名称",
-      "type": "废标项/格式/错字",
+      "type": "废标项/评分项/措辞/错字",
       "status": "pass/warning/danger",
       "detail": "检查说明",
       "confidence": 0.62,
-      "need_human": true
+      "need_human": true,
+      "page": 3
     }
   ],
   "summary": "共检查N项，通过X项，警告Y项，危险Z项，需人工确认W项"
 }
 
 约束：
+- page：该条结论对应的原文页码（整数），**只能填正文中实际出现过的【第 N 页】标记里的数字**；
+  正文没有对应页码标记、无法确定时**必须填 null**，**严禁推测或编造页码**；
 - 逐条给出 confidence（0-1，两位小数）；证据不足/无法确认的项 need_human=true，不要强行下结论；
 - 不编造检查结果，无法确认时如实标注 warning + need_human=true；
 - 输出项数不超过 {max_items}，按风险优先级（危险>警告）保留。"""
@@ -447,19 +456,24 @@ def get_self_check_prompt() -> ChatPromptTemplate:
 
 
 def get_bidding_review_prompt(max_items: int = 20) -> ChatPromptTemplate:
-    """投标文件审核 prompt：审核废标项/格式/错字，输出结构化 JSON（仅输出 JSON）。
+    """投标文件审核 prompt：做语义层面审核（废标项/评分点/措辞/错字），输出结构化 JSON。
 
     约束：
-    - 逐条检查废标项，标注 pass/warning/danger；
+    - bidding_content 已由调用方按【第 N 页】分页标记，模型据此给出 page 页码；
+    - 只做需要读懂语义的判断，页码/页数/材料清单齐全等确定性检查由后端规则负责，不重复输出；
     - 不确定项 need_human=true（后端再按 confidence < 阈值兜底）；
     - 有招标文件（tender_info）时交叉比对，无则做通用检查；
     - 输出项数不超过 max_items（取 config.bidding_review_max_items）。
+
+    system 消息含 JSON 示例花括号，直接构造 SystemMessage 绕过模板解析，max_items 用 replace 注入。
     """
+    system = _BIDDING_REVIEW_SYSTEM.replace("{max_items}", str(max_items))
     return ChatPromptTemplate.from_messages([
-        ("system", _BIDDING_REVIEW_SYSTEM.format(max_items=max_items)),
+        SystemMessage(content=system),
         ("human",
          "招标文件解析结果（JSON，可选，用于交叉比对；空则做通用废标项检查）：\n{tender_info}\n\n"
-         "投标文件内容：\n{bidding_content}\n\n请逐项审核并输出结构化 JSON。"),
+         "投标文件内容（已按【第 N 页】分页标记，页码标记是可信的页码来源）：\n{bidding_content}\n\n"
+         "请逐项审核并输出结构化 JSON（只输出语义判断项，页码/页数等确定性检查不要输出）。"),
     ])
 
 

@@ -335,6 +335,36 @@ def test_build_chain_returns_runnable():
 # ---------------------------------------------------------------------------
 
 
+def test_rule_based_checks():
+    """规则检查：极短页/占位符/总页数三类确定性结论，均带真实页码且为高置信。"""
+    from app.ai.tools import _rule_based_checks
+
+    pages = [
+        (1, "投标文件正文，包含足够长度的正常内容用于通过极短页检查。"),
+        (2, "   "),
+        (3, "本页出现占位符：此处填写，请替换为实际内容。"),
+        (4, "正文内容，长度超过二十个字以保证不被判定为极短页内容。"),
+    ]
+    items = _rule_based_checks(pages)
+    by_item = {it["item"]: it for it in items}
+
+    assert by_item["空白页/极短页"]["status"] == "warning"
+    assert by_item["空白页/极短页"]["page"] == 2  # 真实页码
+    assert by_item["占位符残留"]["status"] == "danger"
+    assert by_item["占位符残留"]["page"] == 3     # 真实页码
+    assert by_item["总页数异常"]["status"] == "warning"  # 4 页 < 5 页
+    # 规则项均为确定性结论，不参与置信度兜底
+    assert all(it["confidence"] == 1.0 and it["need_human"] is False for it in items)
+
+
+def test_rule_based_checks_clean():
+    """干净且页数充足的文档不产生任何规则项。"""
+    from app.ai.tools import _rule_based_checks
+
+    pages = [(i, f"第{i}页正文内容，长度足够长，不含任何占位符或空白。") for i in range(1, 6)]
+    assert _rule_based_checks(pages) == []
+
+
 def _register_and_login(client, username: str = "ai_user", password: str = "secret123") -> tuple[str, int]:
     resp = client.post("/auth/register", json={"username": username, "password": password})
     assert resp.status_code == 201, resp.text

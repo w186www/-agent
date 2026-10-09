@@ -706,10 +706,13 @@ def _resolve_bidding_file(path: str) -> str | None:
     return path if Path(path).exists() else None
 
 
-def _extract_doc_text(file_path: str) -> tuple[str | None, str | None]:
-    """提取文档全文（与 parse_tender 相同的 .pdf/.docx/.doc 分流逻辑）。
+def _extract_doc_pages(file_path: str) -> tuple[list[tuple[int, str]] | None, str | None]:
+    """分页提取文档文本（与 parse_tender 相同的 .pdf/.docx/.doc 分流逻辑）。
 
-    返回 (文本, 错误信息)：成功时错误为 None，失败时文本为 None。
+    返回 (页列表, 错误信息)：成功时为 [(页码, 该页文本), ...]，失败时页列表为 None。
+    - PDF：PyMuPDF 逐页取文本，页码从 1 开始；
+    - docx：python-docx 按段落拼接，docx 无稳定页码，全部归为第 1 页；
+    - .doc：保持旧逻辑，失败时提示转换为 .pdf/.docx。
     """
     p = Path(file_path)
     ext = p.suffix.lower()
@@ -719,21 +722,21 @@ def _extract_doc_text(file_path: str) -> tuple[str | None, str | None]:
 
             doc = fitz.open(str(p))
             try:
-                text = "\n".join(page.get_text() for page in doc)
+                pages = [(index, page.get_text()) for index, page in enumerate(doc, start=1)]
             finally:
                 doc.close()
         elif ext == ".docx":
             from docx import Document
 
             doc = Document(str(p))
-            text = "\n".join(para.text for para in doc.paragraphs)
+            pages = [(1, "\n".join(para.text for para in doc.paragraphs))]
         elif ext == ".doc":
             # python-docx 无法解析真正的旧版 .doc（OLE），尝试读取，失败则建议转 PDF
             try:
                 from docx import Document
 
                 doc = Document(str(p))
-                text = "\n".join(para.text for para in doc.paragraphs)
+                pages = [(1, "\n".join(para.text for para in doc.paragraphs))]
             except Exception:
                 logger.warning("review_bidding 旧版 .doc 解析失败 file=%s", file_path)
                 return None, "旧版 .doc 格式无法直接解析，请将文件转换为 .pdf 或 .docx 后重新审核"
@@ -743,12 +746,85 @@ def _extract_doc_text(file_path: str) -> tuple[str | None, str | None]:
         logger.warning("review_bidding 文本提取失败 file=%s: %s", file_path, exc)
         return None, str(exc)
 
-    text = (text or "").strip()
-    if not text:
+    if not any((text or "").strip() for _, text in pages):
         return None, "未能从文件中提取到任何文本"
+    return pages, None
+
+
+def _extract_doc_text(file_path: str) -> tuple[str | None, str | None]:
+    """提取文档全文（基于 _extract_doc_pages 拼接，行为与原实现保持一致）。
+
+    返回 (文本, 错误信息)：成功时错误为 None，失败时文本为 None。
+    """
+    pages, err = _extract_doc_pages(file_path)
+    if pages is None:
+        return None, err
+    text = "\n".join(text for _, text in pages).strip()
     if len(text) > settings.parse_max_text_length:
         text = text[: settings.parse_max_text_length]
     return text, None
+
+
+# 规则检查参数：极短页字符阈值、最小总页数、占位符残留关键词
+_RULE_MIN_PAGE_CHARS = 20
+_RULE_MIN_TOTAL_PAGES = 5
+_PLACEHOLDER_TOKENS = ("此处填写", "XXX", "待补充", "TODO", "（空）", "xx有限公司")
+
+
+def _rule_based_checks(pages: list[tuple[int, str]]) -> list[dict]:
+    """确定性规则检查：只做"数得出来、不需要读懂语义"的判断。
+
+    输出结构与模型 items 对齐（额外带 page 页码），confidence 恒为 1.0、need_human 恒为 False
+    （本身就是确定性结论，不参与置信度阈值兜底）。同一类问题只占一条，detail 里列出所有页码。
+    """
+    items: list[dict] = []
+
+    # 1. 空白页/极短页：去空白后字符数 < 阈值的页，合并为一条并列出全部页码
+    short_pages = [num for num, text in pages if len((text or "").strip()) < _RULE_MIN_PAGE_CHARS]
+    if short_pages:
+        page_list = "、".join(str(num) for num in short_pages)
+        items.append({
+            "item": "空白页/极短页",
+            "type": "格式",
+            "status": "warning",
+            "detail": f"第 {page_list} 页去空白后不足 {_RULE_MIN_PAGE_CHARS} 字，疑似空白页或内容缺失。",
+            "confidence": 1.0,
+            "need_human": False,
+            "page": short_pages[0],
+        })
+
+    # 2. 占位符残留：逐条记录 (页码, 关键词)，合并为一条 danger
+    hits: list[tuple[int, str]] = []
+    for num, text in pages:
+        low = (text or "").lower()
+        for token in _PLACEHOLDER_TOKENS:
+            if token.lower() in low:
+                hits.append((num, token))
+    if hits:
+        detail_list = "、".join(f"第 {num} 页「{token}」" for num, token in hits)
+        items.append({
+            "item": "占位符残留",
+            "type": "格式",
+            "status": "danger",
+            "detail": f"正文检测到未替换的占位符：{detail_list}，请补全后再提交。",
+            "confidence": 1.0,
+            "need_human": False,
+            "page": hits[0][0],
+        })
+
+    # 3. 总页数异常：总页数少于阈值，无法定位具体页码
+    if len(pages) < _RULE_MIN_TOTAL_PAGES:
+        items.append({
+            "item": "总页数异常",
+            "type": "格式",
+            "status": "warning",
+            "detail": f"文档总页数为 {len(pages)} 页，少于 {_RULE_MIN_TOTAL_PAGES} 页，可能内容不完整。",
+            "confidence": 1.0,
+            "need_human": False,
+            "page": None,
+        })
+
+    return items
 
 
 @tool
@@ -762,36 +838,40 @@ def review_bidding(bidding_file_path: str, tender_info: str = "") -> str:
     # 惰性导入：prompt_layer 顶层依赖本模块（search_tender 等），避免循环导入
     from .prompt_layer import get_bidding_review_prompt
     try:
-        # 1. 定位文件并提取全文（复用 parse_tender 的分流逻辑）
+        # 1. 定位文件并分页提取（复用 parse_tender 的分流逻辑，保留页码信息）
         local_path = _resolve_bidding_file(bidding_file_path)
         if local_path is None:
             return json.dumps(
                 {"error": "文件不存在", "detail": f"{bidding_file_path} 无法访问"},
                 ensure_ascii=False,
             )
-        text, err = _extract_doc_text(local_path)
-        if text is None:
+        pages, err = _extract_doc_pages(local_path)
+        if pages is None:
             return json.dumps({"error": "投标文件解析失败", "detail": err}, ensure_ascii=False)
 
-        # 2. 交给 DeepSeek 做结构化审核（有 tender_info 交叉比对，无则通用检查）
+        # 2. 规则层：确定性检查（页码/页数/占位符等），无需模型即可得出
+        rule_items = _rule_based_checks(pages)
+
+        # 3. 语义层：全文按【第 N 页】标记拼接后交给 DeepSeek（超长截断）
+        marked_text = "\n".join(f"【第 {num} 页】\n{text or ''}" for num, text in pages)
+        if len(marked_text) > settings.parse_max_text_length:
+            marked_text = marked_text[: settings.parse_max_text_length]
         prompt = get_bidding_review_prompt(max_items=settings.bidding_review_max_items)
         llm = get_deepseek()
         response = llm.invoke(
             prompt.format_messages(
                 tender_info=tender_info or "（无招标文件解析结果，做通用废标项检查）",
-                bidding_content=text,
+                bidding_content=marked_text,
             ),
             response_format={"type": "json_object"},
         )
         result = _parse_llm_json(response.content)
 
-        # 3. 后端兜底：need_human 由 confidence < 阈值决定；items 截断到最大检查项数
-        items = result.get("items")
-        if not isinstance(items, list):
-            items = []
-        items = items[: settings.bidding_review_max_items]
-        counts = {"pass": 0, "warning": 0, "danger": 0, "human": 0}
-        for item in items:
+        # 4. 模型项兜底：need_human 由 confidence < 阈值决定；page 归一化为整数或 null
+        model_items = result.get("items")
+        if not isinstance(model_items, list):
+            model_items = []
+        for item in model_items:
             if not isinstance(item, dict):
                 continue
             try:
@@ -801,26 +881,43 @@ def review_bidding(bidding_file_path: str, tender_info: str = "") -> str:
             item["confidence"] = round(conf, 2)
             if conf < settings.review_confidence_threshold:
                 item["need_human"] = True
+            page = item.get("page")
+            item["page"] = page if isinstance(page, int) and not isinstance(page, bool) else None
+
+        # 5. 合并：规则项 + 模型项，按 (item, page) 去重后统一截断
+        merged: list[dict] = []
+        seen: set[tuple] = set()
+        for item in rule_items + [i for i in model_items if isinstance(i, dict)]:
+            key = (item.get("item"), item.get("page"))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+        items = merged[: settings.bidding_review_max_items]
+
+        # 6. 重算 counts / summary；overall_status 只升不降（规则命中危险时必须体现）
+        counts = {"pass": 0, "warning": 0, "danger": 0, "human": 0}
+        for item in items:
             status = str(item.get("status") or "").lower()
             if status in counts:
                 counts[status] += 1
             if item.get("need_human"):
                 counts["human"] += 1
         result["items"] = items
-        if not result.get("overall_status"):
-            result["overall_status"] = (
-                "danger" if counts["danger"] else "warning" if counts["warning"] else "pass"
-            )
-        if not result.get("summary"):
-            result["summary"] = (
-                f"共检查{len(items)}项，通过{counts['pass']}项，警告{counts['warning']}项，"
-                f"危险{counts['danger']}项，需人工确认{counts['human']}项"
-            )
+        derived = "danger" if counts["danger"] else "warning" if counts["warning"] else "pass"
+        order = {"pass": 0, "warning": 1, "danger": 2}
+        current = str(result.get("overall_status") or "").lower()
+        if current not in order or order[derived] > order[current]:
+            result["overall_status"] = derived
+        result["summary"] = (
+            f"共检查{len(items)}项，通过{counts['pass']}项，警告{counts['warning']}项，"
+            f"危险{counts['danger']}项，需人工确认{counts['human']}项"
+        )
 
         logger.info(
-            "review_bidding 完成 文本长度=%d 检查项=%d overall=%s 需人工=%d 耗时=%dms",
-            len(text), len(items), result.get("overall_status"), counts["human"],
-            round((time.perf_counter() - start) * 1000),
+            "review_bidding 完成 文本长度=%d 规则命中=%d 模型返回=%d 合并项=%d overall=%s 需人工=%d 耗时=%dms",
+            len(marked_text), len(rule_items), len(model_items), len(items),
+            result.get("overall_status"), counts["human"], round((time.perf_counter() - start) * 1000),
         )
         return json.dumps(result, ensure_ascii=False)
     except Exception as exc:
